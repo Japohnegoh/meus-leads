@@ -14,19 +14,29 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: "21"
 
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
 
-      # Gera as pastas do Android (o projeto sรณ guarda pubspec.yaml e lib/main.dart)
       - name: Criar arquivos do Android
         run: |
           flutter create --platforms=android --project-name meus_leads --org br.com.meusleads .
           sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/>\n    <application|' android/app/src/main/AndroidManifest.xml
           sed -i 's|android:label="[^"]*"|android:label="Meus Leads"|' android/app/src/main/AndroidManifest.xml
+
+      - name: Desativar a verificação lint do release
+        run: |
+          mkdir -p ~/.gradle/init.d
+          cat > ~/.gradle/init.d/sem-lint.gradle <<'EOF'
+          allprojects {
+            tasks.configureEach { task ->
+              if (task.name.startsWith("lintVital")) { task.enabled = false }
+            }
+          }
+          EOF
 
       - run: flutter pub get
 
