@@ -1,4 +1,4 @@
-name: Gerar APK
+name: Gerar APK e Site
 
 on:
   workflow_dispatch:
@@ -46,3 +46,36 @@ jobs:
         with:
           name: meus-leads-apk
           path: build/app/outputs/flutter-apk/app-release.apk
+
+  site:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Criar arquivos da web
+        run: |
+          flutter create --platforms=web --project-name meus_leads --org br.com.meusleads .
+          sed -i 's|<title>.*</title>|<title>Meus Leads</title>|' web/index.html
+
+      - run: flutter pub get
+
+      - run: flutter build web --release --base-href "/${{ github.event.repository.name }}/"
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: build/web
+
+      - id: deploy
+        uses: actions/deploy-pages@v4
