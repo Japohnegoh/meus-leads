@@ -1,4 +1,4 @@
-name: Gerar APK
+name: Gerar APK e Site
 
 on:
   workflow_dispatch:
@@ -14,7 +14,7 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: "21"
 
       - uses: subosito/flutter-action@v2
         with:
@@ -24,16 +24,46 @@ jobs:
       - name: Criar arquivos do Android
         run: |
           flutter create --platforms=android --project-name meus_leads --org br.com.meusleads .
-          sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/>\n    <application|' android/app/src/main/AndroidManifest.xml
-          sed -i 's|android:label="[^"]*"|android:label="Meus Leads"|' android/app/src/main/AndroidManifest.xml
+          python3 - <<'PY'
+          import re
+          p = "android/app/src/main/AndroidManifest.xml"
+          s = open(p, encoding="utf-8").read()
+          perms = (
+              '<uses-permission android:name="android.permission.INTERNET"/>\n'
+              '    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n'
+              '    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>\n'
+              '    <application'
+          )
+          receivers = (
+              '<receiver android:exported="false" android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver"/>\n'
+              '        <receiver android:exported="false" android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver">\n'
+              '            <intent-filter>\n'
+              '                <action android:name="android.intent.action.BOOT_COMPLETED"/>\n'
+              '                <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>\n'
+              '            </intent-filter>\n'
+              '        </receiver>\n'
+              '    </application>'
+          )
+          s = s.replace("<application", perms, 1).replace("</application>", receivers, 1)
+          s = re.sub(r'android:label="[^"]*"', 'android:label="Meus Leads"', s, count=1)
+          open(p, "w", encoding="utf-8").write(s)
+          PY
 
-      - name: Desativar a verificação lint do release
+      - name: Ajustes do Gradle (desativa lint e liga desugaring)
         run: |
           mkdir -p ~/.gradle/init.d
-          cat > ~/.gradle/init.d/sem-lint.gradle <<'EOF'
+          cat > ~/.gradle/init.d/ajustes.gradle <<'EOF'
           allprojects {
-            tasks.configureEach {
-              if (name.startsWith("lintVital")) { enabled = false }
+            tasks.configureEach { task ->
+              if (task.name.startsWith("lintVital")) { task.enabled = false }
+            }
+            pluginManager.withPlugin("com.android.application") {
+              android.compileOptions.coreLibraryDesugaringEnabled = true
+            }
+            afterEvaluate {
+              if (plugins.hasPlugin("com.android.application")) {
+                dependencies.add("coreLibraryDesugaring", "com.android.tools:desugar_jdk_libs:2.1.4")
+              }
             }
           }
           EOF
@@ -46,3 +76,36 @@ jobs:
         with:
           name: meus-leads-apk
           path: build/app/outputs/flutter-apk/app-release.apk
+
+  site:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Criar arquivos da web
+        run: |
+          flutter create --platforms=web --project-name meus_leads --org br.com.meusleads .
+          sed -i 's|<title>.*</title>|<title>Meus Leads</title>|' web/index.html
+
+      - run: flutter pub get
+
+      - run: flutter build web --release --base-href "/${{ github.event.repository.name }}/"
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: build/web
+
+      - id: deploy
+        uses: actions/deploy-pages@v4
