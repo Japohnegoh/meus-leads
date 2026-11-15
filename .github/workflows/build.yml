@@ -24,8 +24,49 @@ jobs:
       - name: Criar arquivos do Android
         run: |
           flutter create --platforms=android --project-name meus_leads --org br.com.meusleads .
-          sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/>\n    <application|' android/app/src/main/AndroidManifest.xml
-          sed -i 's|android:label="[^"]*"|android:label="Meus Leads"|' android/app/src/main/AndroidManifest.xml
+          python3 - <<'PY'
+          import os, re
+          p = "android/app/src/main/AndroidManifest.xml"
+          s = open(p, encoding="utf-8").read()
+          perms = (
+              '<uses-permission android:name="android.permission.INTERNET"/>\n'
+              '    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n'
+              '    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>\n'
+              '    <application'
+          )
+          receivers = (
+              '<receiver android:exported="false" android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver"/>\n'
+              '        <receiver android:exported="false" android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver">\n'
+              '            <intent-filter>\n'
+              '                <action android:name="android.intent.action.BOOT_COMPLETED"/>\n'
+              '                <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>\n'
+              '            </intent-filter>\n'
+              '        </receiver>\n'
+              '    </application>'
+          )
+          s = s.replace("<application", perms, 1).replace("</application>", receivers, 1)
+          s = re.sub(r'android:label="[^"]*"', 'android:label="Meus Leads"', s, count=1)
+          open(p, "w", encoding="utf-8").write(s)
+
+          kts = "android/app/build.gradle.kts"
+          grv = "android/app/build.gradle"
+          if os.path.exists(kts):
+              g = open(kts, encoding="utf-8").read()
+              if "compileOptions {" in g:
+                  g = g.replace("compileOptions {", "compileOptions {\n        isCoreLibraryDesugaringEnabled = true", 1)
+              else:
+                  g = g.replace("android {", "android {\n    compileOptions {\n        isCoreLibraryDesugaringEnabled = true\n    }", 1)
+              g += '\ndependencies {\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")\n}\n'
+              open(kts, "w", encoding="utf-8").write(g)
+          else:
+              g = open(grv, encoding="utf-8").read()
+              if "compileOptions {" in g:
+                  g = g.replace("compileOptions {", "compileOptions {\n        coreLibraryDesugaringEnabled true", 1)
+              else:
+                  g = g.replace("android {", "android {\n    compileOptions {\n        coreLibraryDesugaringEnabled true\n    }", 1)
+              g += "\ndependencies {\n    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'\n}\n"
+              open(grv, "w", encoding="utf-8").write(g)
+          PY
 
       - name: Desativar a verificação lint do release
         run: |
