@@ -1,5 +1,9 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:timezone/data/latest.dart' as tzdata;
+import 'package:timezone/timezone.dart' as tz;
 import 'package:url_launcher/url_launcher.dart';
 
 // Chave publishable: foi feita para ficar no app. Nunca coloque aqui a chave secret.
@@ -9,6 +13,7 @@ const _key = 'sb_publishable_FZi9CphFqTjU-ifyFuQh1A_diPVVYgx';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Supabase.initialize(url: _url, anonKey: _key);
+  await Lembretes.iniciar();
   runApp(const App());
 }
 
@@ -127,7 +132,7 @@ class _HomeState extends State<HomePage> {
   @override
   Widget build(BuildContext context) => Scaffold(
         appBar: AppBar(
-          title: Text(aba == 0 ? 'Leads' : 'Comissões'),
+          title: Text(const ['Leads', 'Comissões', 'Imóveis', 'Relatórios'][aba]),
           actions: [
             IconButton(
               tooltip: 'Sair',
@@ -136,13 +141,15 @@ class _HomeState extends State<HomePage> {
             ),
           ],
         ),
-        body: aba == 0 ? const LeadsTab() : const ComissoesTab(),
+        body: const [LeadsTab(), ComissoesTab(), ImoveisTab(), RelatoriosTab()][aba],
         bottomNavigationBar: NavigationBar(
           selectedIndex: aba,
           onDestinationSelected: (i) => setState(() => aba = i),
           destinations: const [
             NavigationDestination(icon: Icon(Icons.people), label: 'Leads'),
             NavigationDestination(icon: Icon(Icons.payments), label: 'Comissões'),
+            NavigationDestination(icon: Icon(Icons.home_work), label: 'Imóveis'),
+            NavigationDestination(icon: Icon(Icons.bar_chart), label: 'Relatórios'),
           ],
         ),
       );
@@ -171,6 +178,7 @@ class _LeadsState extends State<LeadsTab> {
           .select('*, imoveis(nome, valor_base, percentual_comissao)')
           .order('criado_em', ascending: false);
       if (mounted) setState(() => leads = r);
+      Lembretes.sincronizar(r);
     } catch (e) {
       if (mounted) {
         setState(() => leads = []);
@@ -259,6 +267,23 @@ class _LeadsState extends State<LeadsTab> {
     await mudarStatus(l, 'fechado');
   }
 
+  Future<void> excluir(Map<String, dynamic> l) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('Excluir lead?'),
+        content: Text('${l['nome']} será apagado. Se houver comissão registrada para ele, ela também será apagada.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Cancelar')),
+          FilledButton(onPressed: () => Navigator.pop(c, true), child: const Text('Excluir')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await db.from('leads').delete().eq('id', l['id']);
+    carregar();
+  }
+
   void acoes(Map<String, dynamic> l) {
     void fazer(BuildContext c, VoidCallback f) {
       Navigator.pop(c);
@@ -299,6 +324,19 @@ class _LeadsState extends State<LeadsTab> {
               title: const Text('Marcar como perdido'),
               onTap: () => fazer(c, () => mudarStatus(l, 'perdido')),
             ),
+            ListTile(
+              leading: const Icon(Icons.edit),
+              title: const Text('Editar lead'),
+              onTap: () => fazer(c, () async {
+                await Navigator.push(context, MaterialPageRoute(builder: (_) => LeadForm(lead: l)));
+                carregar();
+              }),
+            ),
+            ListTile(
+              leading: const Icon(Icons.delete),
+              title: const Text('Excluir lead'),
+              onTap: () => fazer(c, () => excluir(l)),
+            ),
           ]),
         ),
       ),
@@ -334,7 +372,7 @@ class _LeadsState extends State<LeadsTab> {
                           final im = l['imoveis'];
                           final detalhes = [
                             if (im != null) im['nome'],
-                            if (l['status'] == 'encaminhado' && l['proximo_retorno'] != null)
+                            if (l['proximo_retorno'] != null && l['status'] != 'fechado' && l['status'] != 'perdido')
                               'cobrar retorno em ${dataBr(l['proximo_retorno'])}',
                           ].join(' · ');
                           return ListTile(
@@ -351,17 +389,19 @@ class _LeadsState extends State<LeadsTab> {
 
 // ---------------------------------------------------------------- Novo lead
 class LeadForm extends StatefulWidget {
-  const LeadForm({super.key});
+  final Map<String, dynamic>? lead;
+  const LeadForm({super.key, this.lead});
   @override
   State<LeadForm> createState() => _LeadFormState();
 }
 
 class _LeadFormState extends State<LeadForm> {
-  final nome = TextEditingController();
-  final tel = TextEditingController();
-  final origem = TextEditingController();
-  final faixa = TextEditingController();
-  final obs = TextEditingController();
+  late final nome = TextEditingController(text: widget.lead?['nome']);
+  late final tel = TextEditingController(text: widget.lead?['telefone']);
+  late final origem = TextEditingController(text: widget.lead?['origem']);
+  late final faixa = TextEditingController(text: widget.lead?['faixa_valor']);
+  late final obs = TextEditingController(text: widget.lead?['observacoes']);
+  late String? retorno = widget.lead?['proximo_retorno'];
   List<Map<String, dynamic>> imoveis = [];
   Map<String, dynamic>? imovel;
   bool salvando = false;
@@ -369,8 +409,13 @@ class _LeadFormState extends State<LeadForm> {
   @override
   void initState() {
     super.initState();
-    db.from('imoveis').select().eq('ativo', true).order('nome').then((r) {
-      if (mounted) setState(() => imoveis = r);
+    db.from('imoveis').select().order('nome').then((r) {
+      if (!mounted) return;
+      final atual = widget.lead?['imovel_id'];
+      setState(() {
+        imoveis = r.where((i) => i['ativo'] == true || i['id'] == atual).toList();
+        imovel = imoveis.where((i) => i['id'] == atual).firstOrNull;
+      });
     });
   }
 
@@ -380,15 +425,21 @@ class _LeadFormState extends State<LeadForm> {
       return;
     }
     setState(() => salvando = true);
+    final dados = {
+      'nome': nome.text.trim(),
+      'telefone': tel.text.trim(),
+      'origem': origem.text.trim(),
+      'imovel_id': imovel?['id'],
+      'faixa_valor': faixa.text.trim(),
+      'observacoes': obs.text.trim(),
+      'proximo_retorno': retorno,
+    };
     try {
-      await db.from('leads').insert({
-        'nome': nome.text.trim(),
-        'telefone': tel.text.trim(),
-        'origem': origem.text.trim(),
-        'imovel_id': imovel?['id'],
-        'faixa_valor': faixa.text.trim(),
-        'observacoes': obs.text.trim(),
-      });
+      if (widget.lead == null) {
+        await db.from('leads').insert(dados);
+      } else {
+        await db.from('leads').update(dados).eq('id', widget.lead!['id']);
+      }
       if (mounted) Navigator.pop(context);
     } catch (e) {
       if (mounted) {
@@ -411,7 +462,7 @@ class _LeadFormState extends State<LeadForm> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(title: const Text('Novo lead')),
+        appBar: AppBar(title: Text(widget.lead == null ? 'Novo lead' : 'Editar lead')),
         body: ListView(padding: const EdgeInsets.all(16), children: [
           campo('Nome', nome),
           campo('Telefone (com DDD)', tel, teclado: TextInputType.phone),
@@ -437,6 +488,23 @@ class _LeadFormState extends State<LeadForm> {
             ),
           const SizedBox(height: 12),
           campo('Faixa de valor', faixa),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.event),
+            title: Text(retorno == null ? 'Definir próximo retorno (lembrete)' : 'Retorno em ${dataBr(retorno!)}'),
+            trailing: retorno == null
+                ? null
+                : IconButton(icon: const Icon(Icons.clear), onPressed: () => setState(() => retorno = null)),
+            onTap: () async {
+              final d = await showDatePicker(
+                context: context,
+                initialDate: retorno == null ? DateTime.now() : DateTime.parse(retorno!),
+                firstDate: DateTime(2020),
+                lastDate: DateTime(2100),
+              );
+              if (d != null) setState(() => retorno = d.toIso8601String().substring(0, 10));
+            },
+          ),
           campo('Observações', obs, linhas: 3),
           FilledButton(
             onPressed: salvando ? null : salvar,
@@ -531,5 +599,334 @@ class _ComissoesState extends State<ComissoesTab> {
           ),
       ]),
     );
+  }
+}
+
+// ---------------------------------------------------------------- Imóveis
+class ImoveisTab extends StatefulWidget {
+  const ImoveisTab({super.key});
+  @override
+  State<ImoveisTab> createState() => _ImoveisState();
+}
+
+class _ImoveisState extends State<ImoveisTab> {
+  List<Map<String, dynamic>>? itens;
+
+  @override
+  void initState() {
+    super.initState();
+    carregar();
+  }
+
+  Future<void> carregar() async {
+    try {
+      final r = await db.from('imoveis').select().order('nome');
+      if (mounted) setState(() => itens = r);
+    } catch (e) {
+      if (mounted) {
+        setState(() => itens = []);
+        aviso(context, 'Erro ao carregar os imóveis: $e');
+      }
+    }
+  }
+
+  Future<void> editar([Map<String, dynamic>? im]) async {
+    final nome = TextEditingController(text: im?['nome']);
+    final local = TextEditingController(text: im?['localizacao']);
+    final valor = TextEditingController(text: im == null ? '' : paraTexto(im['valor_base']));
+    final perc = TextEditingController(text: im == null ? '' : paraTexto(im['percentual_comissao']));
+    bool ativo = im?['ativo'] ?? true;
+    const teclado = TextInputType.numberWithOptions(decimal: true);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (c) => StatefulBuilder(
+        builder: (c, set) => AlertDialog(
+          title: Text(im == null ? 'Novo imóvel' : 'Editar imóvel'),
+          content: SingleChildScrollView(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              TextField(controller: nome, decoration: const InputDecoration(labelText: 'Nome')),
+              TextField(controller: local, decoration: const InputDecoration(labelText: 'Localização')),
+              TextField(
+                controller: valor,
+                keyboardType: teclado,
+                decoration: const InputDecoration(labelText: 'Valor base (R\$)'),
+              ),
+              TextField(
+                controller: perc,
+                keyboardType: teclado,
+                decoration: const InputDecoration(labelText: 'Comissão (%)'),
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Disponível para novos leads'),
+                value: ativo,
+                onChanged: (v) => set(() => ativo = v),
+              ),
+            ]),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Cancelar')),
+            FilledButton(onPressed: () => Navigator.pop(c, true), child: const Text('Salvar')),
+          ],
+        ),
+      ),
+    );
+    if (ok != true) return;
+    final v = lerNum(valor.text), p = lerNum(perc.text);
+    if (nome.text.trim().isEmpty || v == null || p == null) {
+      if (mounted) aviso(context, 'Preencha nome, valor e percentual.');
+      return;
+    }
+    final dados = {
+      'nome': nome.text.trim(),
+      'localizacao': local.text.trim(),
+      'valor_base': v,
+      'percentual_comissao': p,
+      'ativo': ativo,
+    };
+    if (im == null) {
+      await db.from('imoveis').insert(dados);
+    } else {
+      await db.from('imoveis').update(dados).eq('id', im['id']);
+    }
+    carregar();
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        floatingActionButton: FloatingActionButton.extended(
+          icon: const Icon(Icons.add),
+          label: const Text('Novo imóvel'),
+          onPressed: () => editar(),
+        ),
+        body: itens == null
+            ? const Center(child: CircularProgressIndicator())
+            : RefreshIndicator(
+                onRefresh: carregar,
+                child: ListView(padding: const EdgeInsets.only(bottom: 88), children: [
+                  if (itens!.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.all(32),
+                      child: Center(child: Text('Nenhum imóvel cadastrado.')),
+                    ),
+                  for (final i in itens!)
+                    ListTile(
+                      title: Text(i['nome']),
+                      subtitle: Text([
+                        if ((i['localizacao'] ?? '').toString().isNotEmpty) i['localizacao'],
+                        '${brl(i['valor_base'])} · comissão ${paraTexto(i['percentual_comissao'])}%',
+                      ].join(' · ')),
+                      trailing: i['ativo'] == true ? null : const Chip(label: Text('Inativo')),
+                      onTap: () => editar(i),
+                    ),
+                ]),
+              ),
+      );
+}
+
+// ---------------------------------------------------------------- Relatórios
+class RelatoriosTab extends StatefulWidget {
+  const RelatoriosTab({super.key});
+  @override
+  State<RelatoriosTab> createState() => _RelatoriosState();
+}
+
+class _RelatoriosState extends State<RelatoriosTab> {
+  List<Map<String, dynamic>>? leads;
+  List<Map<String, dynamic>>? vendas;
+  String periodo = 'mes';
+
+  @override
+  void initState() {
+    super.initState();
+    carregar();
+  }
+
+  Future<void> carregar() async {
+    try {
+      final l = await db.from('leads').select('origem, status, data_atendimento, encaminhado_em');
+      final v = await db.from('comissoes').select('valor_comissao, status, data_fechamento');
+      if (mounted) {
+        setState(() {
+          leads = l;
+          vendas = v;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          leads = [];
+          vendas = [];
+        });
+        aviso(context, 'Erro ao carregar os relatórios: $e');
+      }
+    }
+  }
+
+  DateTime data(dynamic iso) => DateTime.parse(iso.toString().substring(0, 10));
+
+  bool dentro(dynamic iso) {
+    final d = data(iso);
+    final hoje = DateTime.now();
+    if (periodo == 'mes') return d.year == hoje.year && d.month == hoje.month;
+    if (periodo == '30d') {
+      return !d.isBefore(DateTime(hoje.year, hoje.month, hoje.day).subtract(const Duration(days: 30)));
+    }
+    return true;
+  }
+
+  Widget kpi(String titulo, String valor) => SizedBox(
+        width: 160,
+        child: Card(
+          child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(titulo),
+              const SizedBox(height: 4),
+              Text(valor, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+            ]),
+          ),
+        ),
+      );
+
+  Widget barra(String rotulo, num valor, num maximo, String texto) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Row(children: [
+          SizedBox(width: 90, child: Text(rotulo, overflow: TextOverflow.ellipsis)),
+          Expanded(
+            child: LayoutBuilder(
+              builder: (_, c) => Align(
+                alignment: Alignment.centerLeft,
+                child: Container(
+                  height: 18,
+                  width: maximo == 0 ? 2 : (c.maxWidth * valor / maximo).clamp(2, c.maxWidth).toDouble(),
+                  decoration: BoxDecoration(
+                    color: Theme.of(context).colorScheme.primary,
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(texto),
+        ]),
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    if (leads == null || vendas == null) return const Center(child: CircularProgressIndicator());
+    final ls = leads!.where((l) => dentro(l['data_atendimento'])).toList();
+    final vs = vendas!.where((v) => dentro(v['data_fechamento'])).toList();
+    final enc = ls.where((l) => l['encaminhado_em'] != null).length;
+    final total = vs.fold<num>(0, (a, v) => a + (v['valor_comissao'] as num));
+    final conversao = enc == 0 ? 0 : vs.length * 100 / enc;
+
+    final origens = <String, int>{};
+    for (final l in ls) {
+      final o = (l['origem'] ?? '').toString().trim();
+      final k = o.isEmpty ? 'Sem origem' : o;
+      origens[k] = (origens[k] ?? 0) + 1;
+    }
+    final porOrigem = origens.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
+
+    const nomes = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
+    final hoje = DateTime.now();
+    final meses = [for (var i = 5; i >= 0; i--) DateTime(hoje.year, hoje.month - i)];
+    final porMes = [
+      for (final m in meses)
+        vendas!
+            .where((v) => data(v['data_fechamento']).year == m.year && data(v['data_fechamento']).month == m.month)
+            .fold<num>(0, (a, v) => a + (v['valor_comissao'] as num)),
+    ];
+    final maiorMes = porMes.fold<num>(0, (a, b) => a > b ? a : b);
+    final titulo = Theme.of(context).textTheme.titleMedium;
+
+    return RefreshIndicator(
+      onRefresh: carregar,
+      child: ListView(padding: const EdgeInsets.all(16), children: [
+        SegmentedButton<String>(
+          segments: const [
+            ButtonSegment(value: 'mes', label: Text('Este mês')),
+            ButtonSegment(value: '30d', label: Text('30 dias')),
+            ButtonSegment(value: 'tudo', label: Text('Tudo')),
+          ],
+          selected: {periodo},
+          onSelectionChanged: (s) => setState(() => periodo = s.first),
+        ),
+        const SizedBox(height: 12),
+        Wrap(spacing: 8, runSpacing: 8, children: [
+          kpi('Leads atendidos', '${ls.length}'),
+          kpi('Encaminhados', '$enc'),
+          kpi('Vendas fechadas', '${vs.length}'),
+          kpi('Conversão', '${conversao.toStringAsFixed(0)}%'),
+          kpi('Comissões', brl(total)),
+        ]),
+        const SizedBox(height: 20),
+        Text('Leads por origem', style: titulo),
+        const SizedBox(height: 4),
+        if (porOrigem.isEmpty) const Text('Sem leads no período.'),
+        for (final e in porOrigem.take(8))
+          barra(e.key, e.value, porOrigem.first.value, '${e.value}'),
+        const SizedBox(height: 20),
+        Text('Comissões nos últimos 6 meses', style: titulo),
+        const SizedBox(height: 4),
+        for (var i = 0; i < meses.length; i++)
+          barra('${nomes[meses[i].month - 1]}/${meses[i].year % 100}', porMes[i], maiorMes, brl(porMes[i])),
+      ]),
+    );
+  }
+}
+
+// ---------------------------------------------------------------- Lembretes
+// Notificação às 9h do dia do "próximo retorno" de cada lead em aberto.
+class Lembretes {
+  static final _p = FlutterLocalNotificationsPlugin();
+  static bool _ok = false;
+
+  static Future<void> iniciar() async {
+    if (kIsWeb) return;
+    try {
+      tzdata.initializeTimeZones();
+      tz.setLocalLocation(tz.getLocation('America/Sao_Paulo'));
+      await _p.initialize(
+        const InitializationSettings(android: AndroidInitializationSettings('@mipmap/ic_launcher')),
+      );
+      await _p
+          .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
+          ?.requestNotificationsPermission();
+      _ok = true;
+    } catch (_) {}
+  }
+
+  static Future<void> sincronizar(List<Map<String, dynamic>> leads) async {
+    if (!_ok) return;
+    try {
+      await _p.cancelAll();
+      final agora = tz.TZDateTime.now(tz.local);
+      for (final l in leads) {
+        final dia = l['proximo_retorno'];
+        if (dia == null || l['status'] == 'fechado' || l['status'] == 'perdido') continue;
+        final d = DateTime.parse(dia.toString());
+        final quando = tz.TZDateTime(tz.local, d.year, d.month, d.day, 9);
+        if (quando.isBefore(agora)) continue;
+        await _p.zonedSchedule(
+          (l['id'] as String).hashCode & 0x7fffffff,
+          'Hora de cobrar retorno',
+          '${l['nome']}: veja com o gerente como está o atendimento.',
+          quando,
+          const NotificationDetails(
+            android: AndroidNotificationDetails(
+              'retornos',
+              'Retornos de leads',
+              channelDescription: 'Lembretes para cobrar o retorno do gerente',
+              importance: Importance.high,
+              priority: Priority.high,
+            ),
+          ),
+          androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+        );
+      }
+    } catch (_) {}
   }
 }
