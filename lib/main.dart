@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
@@ -5,6 +8,8 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:timezone/data/latest.dart' as tzdata;
 import 'package:timezone/timezone.dart' as tz;
 import 'package:url_launcher/url_launcher.dart';
+
+import 'imagens.dart';
 
 // Chave publishable: foi feita para ficar no app. Nunca coloque aqui a chave secret.
 const _url = 'https://lsaqihujwdzybucsfpcp.supabase.co';
@@ -45,6 +50,71 @@ String paraTexto(num n) => n.toString().replaceAll('.', ',');
 void aviso(BuildContext c, String msg) =>
     ScaffoldMessenger.of(c).showSnackBar(SnackBar(content: Text(msg)));
 
+const petroleo = Color(0xFF1F5F5B);
+const verde = Color(0xFF2E7D32);
+const laranja = Color(0xFFE65100);
+const azul = Color(0xFF1565C0);
+const roxo = Color(0xFF6A1B9A);
+
+const statusCores = {
+  'novo': azul,
+  'encaminhado': laranja,
+  'em_negociacao': roxo,
+  'fechado': verde,
+  'perdido': Color(0xFFC62828),
+};
+
+Color corStatus(String s) => statusCores[s] ?? const Color(0xFF546E7A);
+
+final _fotos = <String, Uint8List>{};
+
+// "Logo" do imóvel: a miniatura do PDF (se o nome combina) ou um ícone de casa.
+Widget logoImovel(String nome, {double tamanho = 64}) {
+  final n = nome.toLowerCase();
+  String? chave;
+  for (final k in imagensImoveis.keys) {
+    if (n.contains(k)) {
+      chave = k;
+      break;
+    }
+  }
+  if (chave == null) {
+    return Container(
+      width: tamanho,
+      height: tamanho,
+      decoration: BoxDecoration(
+        color: petroleo.withValues(alpha: .12),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: const Icon(Icons.home_work, color: petroleo),
+    );
+  }
+  final k = chave;
+  final bytes = _fotos.putIfAbsent(k, () => base64Decode(imagensImoveis[k]!));
+  return Container(
+    width: tamanho,
+    height: tamanho,
+    decoration: BoxDecoration(
+      borderRadius: BorderRadius.circular(14),
+      border: Border.all(color: petroleo.withValues(alpha: .3), width: 1.5),
+    ),
+    child: ClipRRect(
+      borderRadius: BorderRadius.circular(12.5),
+      child: Image.memory(bytes, fit: BoxFit.cover, gaplessPlayback: true),
+    ),
+  );
+}
+
+Widget etiqueta(String texto, Color cor) => Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(
+        color: cor.withValues(alpha: .12),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: cor.withValues(alpha: .35)),
+      ),
+      child: Text(texto, style: TextStyle(color: cor, fontWeight: FontWeight.w600, fontSize: 12)),
+    );
+
 Future<void> abrir(String url) => launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
 
 class App extends StatelessWidget {
@@ -54,7 +124,18 @@ class App extends StatelessWidget {
   Widget build(BuildContext context) => MaterialApp(
         title: 'Meus Leads',
         debugShowCheckedModeBanner: false,
-        theme: ThemeData(colorSchemeSeed: const Color(0xFF1F5F5B), useMaterial3: true),
+        theme: ThemeData(
+          colorSchemeSeed: petroleo,
+          useMaterial3: true,
+          cardTheme: CardThemeData(
+            elevation: 0,
+            margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+              side: BorderSide(color: petroleo.withValues(alpha: .22)),
+            ),
+          ),
+        ),
         home: StreamBuilder<AuthState>(
           stream: db.auth.onAuthStateChange,
           builder: (_, __) =>
@@ -365,7 +446,7 @@ class _LeadsState extends State<LeadsTab> {
                         ),
                       ])
                     : ListView.builder(
-                        padding: const EdgeInsets.only(bottom: 88),
+                        padding: const EdgeInsets.only(top: 8, bottom: 88),
                         itemCount: leads!.length,
                         itemBuilder: (_, i) {
                           final l = leads![i];
@@ -375,11 +456,22 @@ class _LeadsState extends State<LeadsTab> {
                             if (l['proximo_retorno'] != null && l['status'] != 'fechado' && l['status'] != 'perdido')
                               'cobrar retorno em ${dataBr(l['proximo_retorno'])}',
                           ].join(' · ');
-                          return ListTile(
-                            title: Text(l['nome']),
-                            subtitle: detalhes.isEmpty ? null : Text(detalhes),
-                            trailing: Chip(label: Text(statusNomes[l['status']] ?? l['status'])),
-                            onTap: () => acoes(l),
+                          final cor = corStatus(l['status']);
+                          final nomeLead = l['nome'].toString().trim();
+                          return Card(
+                            child: ListTile(
+                              leading: CircleAvatar(
+                                backgroundColor: cor.withValues(alpha: .14),
+                                child: Text(
+                                  nomeLead.isEmpty ? '?' : nomeLead[0].toUpperCase(),
+                                  style: TextStyle(color: cor, fontWeight: FontWeight.w700),
+                                ),
+                              ),
+                              title: Text(l['nome'], style: const TextStyle(fontWeight: FontWeight.w600)),
+                              subtitle: detalhes.isEmpty ? null : Text(detalhes),
+                              trailing: etiqueta(statusNomes[l['status']] ?? l['status'], cor),
+                              onTap: () => acoes(l),
+                            ),
                           );
                         },
                       ),
@@ -554,18 +646,45 @@ class _ComissoesState extends State<ComissoesTab> {
     carregar();
   }
 
-  Widget total(String titulo, num valor) => Expanded(
-        child: Card(
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(titulo),
-              const SizedBox(height: 4),
-              Text(brl(valor), style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
-            ]),
+  Widget total(String titulo, num valor, Color cor, IconData icone) => Expanded(
+        child: Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: cor.withValues(alpha: .08),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: cor.withValues(alpha: .3)),
           ),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [
+              Icon(icone, size: 18, color: cor),
+              const SizedBox(width: 6),
+              Text(titulo, style: TextStyle(color: cor, fontWeight: FontWeight.w600)),
+            ]),
+            const SizedBox(height: 6),
+            Text(brl(valor), style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: cor)),
+          ]),
         ),
       );
+
+  Widget item(Map<String, dynamic> c) {
+    final recebida = c['status'] == 'recebida';
+    final cor = recebida ? verde : laranja;
+    return Card(
+      child: ListTile(
+        leading: CircleAvatar(
+          backgroundColor: cor.withValues(alpha: .14),
+          child: Icon(recebida ? Icons.check : Icons.schedule, color: cor),
+        ),
+        title: Text(c['leads']?['nome'] ?? 'Lead removido', style: const TextStyle(fontWeight: FontWeight.w600)),
+        subtitle: Text('${dataBr(c['data_fechamento'])} · venda ${brl(c['valor_venda'])} · ${paraTexto(c['percentual'])}%'),
+        trailing: Column(mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: CrossAxisAlignment.end, children: [
+          Text(brl(c['valor_comissao']), style: TextStyle(fontWeight: FontWeight.w700, color: cor)),
+          Text(recebida ? 'Recebida' : 'A receber', style: TextStyle(color: cor, fontSize: 12)),
+        ]),
+        onTap: () => alternar(c),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -575,7 +694,11 @@ class _ComissoesState extends State<ComissoesTab> {
       child: ListView(children: [
         Padding(
           padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
-          child: Row(children: [total('A receber', soma('a_receber')), total('Recebido', soma('recebida'))]),
+          child: Row(children: [
+            total('A receber', soma('a_receber'), laranja, Icons.schedule),
+            const SizedBox(width: 10),
+            total('Recebido', soma('recebida'), verde, Icons.check_circle),
+          ]),
         ),
         if (itens!.isEmpty)
           const Padding(
@@ -587,16 +710,7 @@ class _ComissoesState extends State<ComissoesTab> {
             padding: EdgeInsets.fromLTRB(16, 12, 16, 4),
             child: Text('Toque em uma comissão para marcar como recebida.'),
           ),
-        for (final c in itens!)
-          ListTile(
-            title: Text(c['leads']?['nome'] ?? 'Lead removido'),
-            subtitle: Text('${dataBr(c['data_fechamento'])} · venda ${brl(c['valor_venda'])} · ${paraTexto(c['percentual'])}%'),
-            trailing: Column(mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: CrossAxisAlignment.end, children: [
-              Text(brl(c['valor_comissao']), style: const TextStyle(fontWeight: FontWeight.w700)),
-              Text(c['status'] == 'recebida' ? 'Recebida' : 'A receber'),
-            ]),
-            onTap: () => alternar(c),
-          ),
+        for (final c in itens!) item(c),
       ]),
     );
   }
@@ -710,14 +824,19 @@ class _ImoveisState extends State<ImoveisTab> {
                       child: Center(child: Text('Nenhum imóvel cadastrado.')),
                     ),
                   for (final i in itens!)
-                    ListTile(
-                      title: Text(i['nome']),
-                      subtitle: Text([
-                        if ((i['localizacao'] ?? '').toString().isNotEmpty) i['localizacao'],
-                        '${brl(i['valor_base'])} · comissão ${paraTexto(i['percentual_comissao'])}%',
-                      ].join(' · ')),
-                      trailing: i['ativo'] == true ? null : const Chip(label: Text('Inativo')),
-                      onTap: () => editar(i),
+                    Card(
+                      child: ListTile(
+                        leading: logoImovel(i['nome'].toString()),
+                        title: Text(i['nome'], style: const TextStyle(fontWeight: FontWeight.w600)),
+                        subtitle: Text([
+                          if ((i['localizacao'] ?? '').toString().isNotEmpty) i['localizacao'],
+                          brl(i['valor_base']),
+                        ].join(' · ')),
+                        trailing: i['ativo'] == true
+                            ? etiqueta('${paraTexto(i['percentual_comissao'])}%', verde)
+                            : etiqueta('Inativo', const Color(0xFF546E7A)),
+                        onTap: () => editar(i),
+                      ),
                     ),
                 ]),
               ),
@@ -775,21 +894,28 @@ class _RelatoriosState extends State<RelatoriosTab> {
     return true;
   }
 
-  Widget kpi(String titulo, String valor) => SizedBox(
+  Widget kpi(String titulo, String valor, Color cor, IconData icone) => SizedBox(
         width: 160,
-        child: Card(
-          child: Padding(
-            padding: const EdgeInsets.all(14),
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(titulo),
-              const SizedBox(height: 4),
-              Text(valor, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
-            ]),
+        child: Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: cor.withValues(alpha: .08),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: cor.withValues(alpha: .3)),
           ),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [
+              Icon(icone, size: 18, color: cor),
+              const SizedBox(width: 6),
+              Expanded(child: Text(titulo, style: TextStyle(color: cor, fontWeight: FontWeight.w600))),
+            ]),
+            const SizedBox(height: 6),
+            Text(valor, style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: cor)),
+          ]),
         ),
       );
 
-  Widget barra(String rotulo, num valor, num maximo, String texto) => Padding(
+  Widget barra(String rotulo, num valor, num maximo, String texto, [Color? cor]) => Padding(
         padding: const EdgeInsets.symmetric(vertical: 4),
         child: Row(children: [
           SizedBox(width: 90, child: Text(rotulo, overflow: TextOverflow.ellipsis)),
@@ -801,7 +927,7 @@ class _RelatoriosState extends State<RelatoriosTab> {
                   height: 18,
                   width: maximo == 0 ? 2 : (c.maxWidth * valor / maximo).clamp(2, c.maxWidth).toDouble(),
                   decoration: BoxDecoration(
-                    color: Theme.of(context).colorScheme.primary,
+                    color: cor ?? Theme.of(context).colorScheme.primary,
                     borderRadius: BorderRadius.circular(4),
                   ),
                 ),
@@ -856,11 +982,11 @@ class _RelatoriosState extends State<RelatoriosTab> {
         ),
         const SizedBox(height: 12),
         Wrap(spacing: 8, runSpacing: 8, children: [
-          kpi('Leads atendidos', '${ls.length}'),
-          kpi('Encaminhados', '$enc'),
-          kpi('Vendas fechadas', '${vs.length}'),
-          kpi('Conversão', '${conversao.toStringAsFixed(0)}%'),
-          kpi('Comissões', brl(total)),
+          kpi('Leads atendidos', '${ls.length}', azul, Icons.people),
+          kpi('Encaminhados', '$enc', laranja, Icons.send),
+          kpi('Vendas fechadas', '${vs.length}', verde, Icons.check_circle),
+          kpi('Conversão', '${conversao.toStringAsFixed(0)}%', roxo, Icons.trending_up),
+          kpi('Comissões', brl(total), petroleo, Icons.payments),
         ]),
         const SizedBox(height: 20),
         Text('Leads por origem', style: titulo),
@@ -872,7 +998,7 @@ class _RelatoriosState extends State<RelatoriosTab> {
         Text('Comissões nos últimos 6 meses', style: titulo),
         const SizedBox(height: 4),
         for (var i = 0; i < meses.length; i++)
-          barra('${nomes[meses[i].month - 1]}/${meses[i].year % 100}', porMes[i], maiorMes, brl(porMes[i])),
+          barra('${nomes[meses[i].month - 1]}/${meses[i].year % 100}', porMes[i], maiorMes, brl(porMes[i]), verde),
       ]),
     );
   }
