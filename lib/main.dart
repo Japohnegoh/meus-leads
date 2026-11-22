@@ -117,6 +117,77 @@ Widget etiqueta(String texto, Color cor) => Container(
 
 Future<void> abrir(String url) => launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
 
+// ---------------------------------------------------------------- Ficha de passagem
+const opcoesCanal = ['indicação', 'marketplace', 'redes', 'PAP', 'ligação', 'outro'];
+const opcoesMoraHoje = {'aluguel': 'Aluguel', 'com_os_pais': 'Com os pais', 'outro': 'Outro'};
+const opcoesTipoRenda = {'carteira': 'Carteira', 'autonomo': 'Autônomo', 'outro': 'Outro'};
+const opcoesRestricao = {'sim': 'Sim', 'nao': 'Não', 'nao_sabe': 'Não sabe'};
+
+String numTexto(dynamic v) => v == null ? '' : paraTexto(v as num);
+String dinheiro(dynamic v) => v == null ? '—' : brl(v as num);
+String simNaoTexto(dynamic v) => v == null ? '—' : (v == true ? 'Sim' : 'Não');
+
+String vazio(dynamic v) {
+  final t = (v ?? '').toString().trim();
+  return t.isEmpty ? '—' : t;
+}
+
+String dataHoraBr(DateTime d) {
+  String dois(int n) => n.toString().padLeft(2, '0');
+  final hora = '${d.hour}h${d.minute == 0 ? '' : dois(d.minute)}';
+  return '${dois(d.day)}/${dois(d.month)} às $hora';
+}
+
+// Mensagem enviada ao gerente, com os mesmos campos da ficha.
+String fichaTexto(Map<String, dynamic> l) {
+  final im = l['imoveis'];
+  final titulo = im == null
+      ? 'FICHA DE PASSAGEM'
+      : 'FICHA DE PASSAGEM – ${im['nome'].toString().toUpperCase()}';
+  final aluguel = l['mora_hoje'] == 'aluguel' ? ' – valor do aluguel: ${dinheiro(l['valor_aluguel'])}' : '';
+  final fgts = l['tem_fgts'] == true ? 'Sim – aprox. ${dinheiro(l['valor_fgts'])}' : simNaoTexto(l['tem_fgts']);
+  final entrada = l['tem_entrada'] == true ? 'Sim – ${dinheiro(l['valor_entrada'])}' : simNaoTexto(l['tem_entrada']);
+  final quando = l['atendimento_em'] == null
+      ? '—'
+      : 'dia ${dataHoraBr(DateTime.parse(l['atendimento_em'].toString()).toLocal())}';
+  final obs = vazio(l['observacoes']);
+  return [
+    '*$titulo*',
+    '',
+    '*Consultor:* ${vazio(l['consultor'])}',
+    '*Cliente:* ${vazio(l['nome'])}',
+    '*Telefone:* ${vazio(l['telefone'])}',
+    '*Canal de origem:* ${vazio(l['origem'])}',
+    '',
+    '*Quem vai morar:* ${vazio(l['quem_vai_morar'])}',
+    '*Mora hoje:* ${opcoesMoraHoje[l['mora_hoje']] ?? '—'}$aluguel',
+    '*Renda familiar:* ${dinheiro(l['renda_familiar'])} – quem compõe: ${vazio(l['quem_compoe_renda'])}',
+    '*Tipo de renda:* ${opcoesTipoRenda[l['tipo_renda']] ?? '—'}',
+    '*Tem FGTS?* $fgts',
+    '*Nome com restrição?* ${opcoesRestricao[l['nome_restrito']] ?? '—'}',
+    '*Já teve imóvel financiado?* ${simNaoTexto(l['ja_teve_financiamento'])}',
+    '*Tem valor para entrada?* $entrada',
+    '',
+    '*O que ele mais quer na casa:* ${vazio(l['o_que_quer_na_casa'])}',
+    '*O que fez procurar agora:* ${vazio(l['motivo_procura'])}',
+    '*Quem decide junto:* ${vazio(l['quem_decide_junto'])}',
+    '*Atendimento agendado:* $quando',
+    '*Confirmado no dia?* ${simNaoTexto(l['confirmado_no_dia'])}',
+    if (obs != '—') ...['', '*Observações:* $obs'],
+  ].join('\n');
+}
+
+// Abre o WhatsApp com a ficha (você escolhe o contato do gerente) e marca o lead como encaminhado.
+Future<void> enviarFicha(Map<String, dynamic> l) async {
+  await abrir('https://wa.me/?text=${Uri.encodeComponent(fichaTexto(l))}');
+  final retorno = DateTime.now().add(const Duration(days: 3)).toIso8601String().substring(0, 10);
+  await db.from('leads').update({
+    'status': 'encaminhado',
+    'encaminhado_em': DateTime.now().toUtc().toIso8601String(),
+    if (l['proximo_retorno'] == null) 'proximo_retorno': retorno,
+  }).eq('id', l['id']);
+}
+
 class App extends StatelessWidget {
   const App({super.key});
 
@@ -278,25 +349,9 @@ class _LeadsState extends State<LeadsTab> {
     return d.length <= 11 ? '55$d' : d;
   }
 
-  // Abre o WhatsApp com o resumo do lead; você escolhe o gerente na lista de contatos.
   Future<void> enviarGerente(Map<String, dynamic> l) async {
-    final im = l['imoveis'];
-    String campo(String k) => (l[k] ?? '').toString();
-    final msg = [
-      '*Novo lead*',
-      'Nome: ${l['nome']}',
-      'Telefone: ${l['telefone']}',
-      if (im != null) 'Imóvel: ${im['nome']}',
-      if (campo('origem').isNotEmpty) 'Origem: ${campo('origem')}',
-      if (campo('faixa_valor').isNotEmpty) 'Faixa de valor: ${campo('faixa_valor')}',
-      if (campo('observacoes').isNotEmpty) 'Obs: ${campo('observacoes')}',
-    ].join('\n');
-    await abrir('https://wa.me/?text=${Uri.encodeComponent(msg)}');
-    final retorno = DateTime.now().add(const Duration(days: 3)).toIso8601String().substring(0, 10);
-    await mudarStatus(l, 'encaminhado', {
-      'encaminhado_em': DateTime.now().toUtc().toIso8601String(),
-      'proximo_retorno': retorno,
-    });
+    await enviarFicha(l);
+    carregar();
   }
 
   Future<void> fecharVenda(Map<String, dynamic> l) async {
@@ -455,6 +510,8 @@ class _LeadsState extends State<LeadsTab> {
                             if (im != null) im['nome'],
                             if (l['proximo_retorno'] != null && l['status'] != 'fechado' && l['status'] != 'perdido')
                               'cobrar retorno em ${dataBr(l['proximo_retorno'])}',
+                            if (l['atendimento_em'] != null)
+                              'atendimento ${dataHoraBr(DateTime.parse(l['atendimento_em'].toString()).toLocal())}',
                           ].join(' · ');
                           final cor = corStatus(l['status']);
                           final nomeLead = l['nome'].toString().trim();
@@ -488,22 +545,47 @@ class LeadForm extends StatefulWidget {
 }
 
 class _LeadFormState extends State<LeadForm> {
-  late final nome = TextEditingController(text: widget.lead?['nome']);
-  late final tel = TextEditingController(text: widget.lead?['telefone']);
-  late final origem = TextEditingController(text: widget.lead?['origem']);
-  late final faixa = TextEditingController(text: widget.lead?['faixa_valor']);
-  late final obs = TextEditingController(text: widget.lead?['observacoes']);
-  late String? retorno = widget.lead?['proximo_retorno'];
+  Map<String, dynamic> get l => widget.lead ?? const {};
+
+  late final consultor = TextEditingController(
+    text: l['consultor'] ?? db.auth.currentUser?.userMetadata?['consultor'],
+  );
+  late final nome = TextEditingController(text: l['nome']);
+  late final tel = TextEditingController(text: l['telefone']);
+  late final quemMora = TextEditingController(text: l['quem_vai_morar']);
+  late final aluguel = TextEditingController(text: numTexto(l['valor_aluguel']));
+  late final renda = TextEditingController(text: numTexto(l['renda_familiar']));
+  late final quemCompoe = TextEditingController(text: l['quem_compoe_renda']);
+  late final fgts = TextEditingController(text: numTexto(l['valor_fgts']));
+  late final entrada = TextEditingController(text: numTexto(l['valor_entrada']));
+  late final querNaCasa = TextEditingController(text: l['o_que_quer_na_casa']);
+  late final motivo = TextEditingController(text: l['motivo_procura']);
+  late final quemDecide = TextEditingController(text: l['quem_decide_junto']);
+  late final obs = TextEditingController(text: l['observacoes']);
+  late String? canal = l['origem'];
+  late String? moraHoje = l['mora_hoje'];
+  late String? tipoRenda = l['tipo_renda'];
+  late String? restricao = l['nome_restrito'];
+  late bool? temFgts = l['tem_fgts'];
+  late bool? jaFinanciou = l['ja_teve_financiamento'];
+  late bool? temEntrada = l['tem_entrada'];
+  late bool? confirmado = l['confirmado_no_dia'];
+  late DateTime? atendimento =
+      l['atendimento_em'] == null ? null : DateTime.parse(l['atendimento_em'].toString()).toLocal();
+  late String? retorno = l['proximo_retorno'];
   List<Map<String, dynamic>> imoveis = [];
   Map<String, dynamic>? imovel;
   bool salvando = false;
+
+  static const _decimal = TextInputType.numberWithOptions(decimal: true);
+  static const _simNao = {true: 'Sim', false: 'Não'};
 
   @override
   void initState() {
     super.initState();
     db.from('imoveis').select().order('nome').then((r) {
       if (!mounted) return;
-      final atual = widget.lead?['imovel_id'];
+      final atual = l['imovel_id'];
       setState(() {
         imoveis = r.where((i) => i['ativo'] == true || i['id'] == atual).toList();
         imovel = imoveis.where((i) => i['id'] == atual).firstOrNull;
@@ -511,99 +593,233 @@ class _LeadFormState extends State<LeadForm> {
     });
   }
 
-  Future<void> salvar() async {
+  Map<String, dynamic> dados() => {
+        'consultor': consultor.text.trim(),
+        'nome': nome.text.trim(),
+        'telefone': tel.text.trim(),
+        'origem': canal,
+        'imovel_id': imovel?['id'],
+        'quem_vai_morar': quemMora.text.trim(),
+        'mora_hoje': moraHoje,
+        'valor_aluguel': moraHoje == 'aluguel' ? lerNum(aluguel.text) : null,
+        'renda_familiar': lerNum(renda.text),
+        'quem_compoe_renda': quemCompoe.text.trim(),
+        'tipo_renda': tipoRenda,
+        'tem_fgts': temFgts,
+        'valor_fgts': temFgts == true ? lerNum(fgts.text) : null,
+        'nome_restrito': restricao,
+        'ja_teve_financiamento': jaFinanciou,
+        'tem_entrada': temEntrada,
+        'valor_entrada': temEntrada == true ? lerNum(entrada.text) : null,
+        'o_que_quer_na_casa': querNaCasa.text.trim(),
+        'motivo_procura': motivo.text.trim(),
+        'quem_decide_junto': quemDecide.text.trim(),
+        'atendimento_em': atendimento?.toUtc().toIso8601String(),
+        'confirmado_no_dia': confirmado,
+        'observacoes': obs.text.trim(),
+        'proximo_retorno': retorno,
+      };
+
+  // Guarda o nome do consultor na conta, para já vir preenchido nos próximos leads.
+  Future<void> lembrarConsultor(String c) async {
+    try {
+      if (c.isNotEmpty && c != db.auth.currentUser?.userMetadata?['consultor']) {
+        await db.auth.updateUser(UserAttributes(data: {'consultor': c}));
+      }
+    } catch (_) {}
+  }
+
+  Future<Map<String, dynamic>?> salvar() async {
     if (nome.text.trim().isEmpty || tel.text.trim().isEmpty) {
-      aviso(context, 'Preencha o nome e o telefone.');
-      return;
+      aviso(context, 'Preencha o nome do cliente e o telefone.');
+      return null;
     }
     setState(() => salvando = true);
-    final dados = {
-      'nome': nome.text.trim(),
-      'telefone': tel.text.trim(),
-      'origem': origem.text.trim(),
-      'imovel_id': imovel?['id'],
-      'faixa_valor': faixa.text.trim(),
-      'observacoes': obs.text.trim(),
-      'proximo_retorno': retorno,
-    };
     try {
-      if (widget.lead == null) {
-        await db.from('leads').insert(dados);
-      } else {
-        await db.from('leads').update(dados).eq('id', widget.lead!['id']);
-      }
-      if (mounted) Navigator.pop(context);
+      const sel = '*, imoveis(nome, valor_base, percentual_comissao)';
+      final Map<String, dynamic> r = widget.lead == null
+          ? await db.from('leads').insert(dados()).select(sel).single()
+          : await db.from('leads').update(dados()).eq('id', widget.lead!['id']).select(sel).single();
+      lembrarConsultor(consultor.text.trim());
+      return r;
     } catch (e) {
       if (mounted) {
         setState(() => salvando = false);
         aviso(context, 'Erro ao salvar: $e');
       }
+      return null;
     }
   }
 
-  Widget campo(String rotulo, TextEditingController c, {TextInputType? teclado, int linhas = 1}) =>
+  Future<void> escolherAtendimento() async {
+    final base = atendimento ?? DateTime.now();
+    final d = await showDatePicker(
+      context: context,
+      initialDate: base,
+      firstDate: DateTime(2020),
+      lastDate: DateTime(2100),
+    );
+    if (d == null || !mounted) return;
+    final h = await showTimePicker(context: context, initialTime: TimeOfDay.fromDateTime(base));
+    if (h == null) return;
+    setState(() => atendimento = DateTime(d.year, d.month, d.day, h.hour, h.minute));
+  }
+
+  Widget secao(String titulo) => Padding(
+        padding: const EdgeInsets.only(top: 14, bottom: 10),
+        child: Text(
+          titulo,
+          style: Theme.of(context).textTheme.titleMedium?.copyWith(color: petroleo, fontWeight: FontWeight.w700),
+        ),
+      );
+
+  Widget campo(String rotulo, TextEditingController c,
+          {TextInputType? teclado, int linhas = 1, String? prefixo}) =>
       Padding(
         padding: const EdgeInsets.only(bottom: 12),
         child: TextField(
           controller: c,
           keyboardType: teclado,
           maxLines: linhas,
-          decoration: InputDecoration(labelText: rotulo, border: const OutlineInputBorder()),
+          textCapitalization: teclado == null ? TextCapitalization.sentences : TextCapitalization.none,
+          decoration: InputDecoration(labelText: rotulo, prefixText: prefixo, border: const OutlineInputBorder()),
         ),
       );
 
-  @override
-  Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(title: Text(widget.lead == null ? 'Novo lead' : 'Editar lead')),
-        body: ListView(padding: const EdgeInsets.all(16), children: [
-          campo('Nome', nome),
-          campo('Telefone (com DDD)', tel, teclado: TextInputType.phone),
-          campo('Origem (anúncio, indicação, Instagram...)', origem),
-          DropdownButtonFormField<Map<String, dynamic>>(
-            value: imovel,
-            isExpanded: true,
-            decoration: const InputDecoration(labelText: 'Imóvel de interesse', border: OutlineInputBorder()),
-            items: [
-              for (final i in imoveis)
-                DropdownMenuItem(value: i, child: Text(i['nome'], overflow: TextOverflow.ellipsis)),
-            ],
-            onChanged: (v) => setState(() => imovel = v),
-          ),
-          if (imovel != null)
-            Padding(
-              padding: const EdgeInsets.only(top: 8),
-              child: Text(
-                'Comissão estimada: ${brl(imovel!['valor_base'] * imovel!['percentual_comissao'] / 100)} '
-                '(${paraTexto(imovel!['percentual_comissao'])}%)',
-                style: const TextStyle(fontWeight: FontWeight.w700),
-              ),
+  Widget lista(String rotulo, Map<String, String> opcoes, String? valor, ValueChanged<String?> mudou) =>
+      Padding(
+        padding: const EdgeInsets.only(bottom: 12),
+        child: DropdownButtonFormField<String>(
+          value: valor,
+          isExpanded: true,
+          decoration: InputDecoration(labelText: rotulo, border: const OutlineInputBorder()),
+          items: [for (final e in opcoes.entries) DropdownMenuItem(value: e.key, child: Text(e.value))],
+          onChanged: mudou,
+        ),
+      );
+
+  Widget escolha<T extends Object>(String rotulo, Map<T, String> opcoes, T? valor, ValueChanged<T?> mudou) =>
+      Padding(
+        padding: const EdgeInsets.only(bottom: 12),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(rotulo),
+          const SizedBox(height: 6),
+          SizedBox(
+            width: double.infinity,
+            child: SegmentedButton<T>(
+              emptySelectionAllowed: true,
+              showSelectedIcon: false,
+              segments: [for (final e in opcoes.entries) ButtonSegment<T>(value: e.key, label: Text(e.value))],
+              selected: valor == null ? <T>{} : {valor},
+              onSelectionChanged: (s) => mudou(s.isEmpty ? null : s.first),
             ),
-          const SizedBox(height: 12),
-          campo('Faixa de valor', faixa),
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: const Icon(Icons.event),
-            title: Text(retorno == null ? 'Definir próximo retorno (lembrete)' : 'Retorno em ${dataBr(retorno!)}'),
-            trailing: retorno == null
-                ? null
-                : IconButton(icon: const Icon(Icons.clear), onPressed: () => setState(() => retorno = null)),
-            onTap: () async {
-              final d = await showDatePicker(
-                context: context,
-                initialDate: retorno == null ? DateTime.now() : DateTime.parse(retorno!),
-                firstDate: DateTime(2020),
-                lastDate: DateTime(2100),
-              );
-              if (d != null) setState(() => retorno = d.toIso8601String().substring(0, 10));
-            },
-          ),
-          campo('Observações', obs, linhas: 3),
-          FilledButton(
-            onPressed: salvando ? null : salvar,
-            child: Text(salvando ? 'Salvando...' : 'Salvar lead'),
           ),
         ]),
       );
+
+  @override
+  Widget build(BuildContext context) {
+    final canais = [...opcoesCanal, if (canal != null && !opcoesCanal.contains(canal)) canal!];
+    return Scaffold(
+      appBar: AppBar(title: Text(widget.lead == null ? 'Ficha de passagem' : 'Editar ficha')),
+      body: ListView(padding: const EdgeInsets.fromLTRB(16, 0, 16, 24), children: [
+        secao('Contato'),
+        campo('Consultor', consultor),
+        campo('Cliente', nome),
+        campo('Telefone (com DDD)', tel, teclado: TextInputType.phone),
+        lista('Canal de origem', {for (final c in canais) c: c[0].toUpperCase() + c.substring(1)}, canal,
+            (v) => setState(() => canal = v)),
+        DropdownButtonFormField<Map<String, dynamic>>(
+          value: imovel,
+          isExpanded: true,
+          decoration: const InputDecoration(labelText: 'Imóvel de interesse', border: OutlineInputBorder()),
+          items: [
+            for (final i in imoveis)
+              DropdownMenuItem(value: i, child: Text(i['nome'], overflow: TextOverflow.ellipsis)),
+          ],
+          onChanged: (v) => setState(() => imovel = v),
+        ),
+        if (imovel != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Text(
+              'Comissão estimada: ${brl(imovel!['valor_base'] * imovel!['percentual_comissao'] / 100)} '
+              '(${paraTexto(imovel!['percentual_comissao'])}%)',
+              style: const TextStyle(fontWeight: FontWeight.w700),
+            ),
+          ),
+        secao('Perfil da família'),
+        campo('Quem vai morar', quemMora),
+        lista('Mora hoje', opcoesMoraHoje, moraHoje, (v) => setState(() => moraHoje = v)),
+        if (moraHoje == 'aluguel') campo('Valor do aluguel', aluguel, teclado: _decimal, prefixo: 'R\$ '),
+        campo('Renda familiar', renda, teclado: _decimal, prefixo: 'R\$ '),
+        campo('Quem compõe a renda', quemCompoe),
+        lista('Tipo de renda', opcoesTipoRenda, tipoRenda, (v) => setState(() => tipoRenda = v)),
+        escolha<bool>('Tem FGTS?', _simNao, temFgts, (v) => setState(() => temFgts = v)),
+        if (temFgts == true) campo('Quanto de FGTS (aproximado)', fgts, teclado: _decimal, prefixo: 'R\$ '),
+        escolha<String>('Nome com restrição?', opcoesRestricao, restricao, (v) => setState(() => restricao = v)),
+        escolha<bool>('Já teve imóvel financiado?', _simNao, jaFinanciou, (v) => setState(() => jaFinanciou = v)),
+        escolha<bool>('Tem valor para entrada?', _simNao, temEntrada, (v) => setState(() => temEntrada = v)),
+        if (temEntrada == true) campo('Valor da entrada', entrada, teclado: _decimal, prefixo: 'R\$ '),
+        secao('Interesse'),
+        campo('O que ele mais quer na casa', querNaCasa, linhas: 2),
+        campo('O que fez procurar agora', motivo, linhas: 2),
+        campo('Quem decide junto', quemDecide),
+        secao('Atendimento'),
+        ListTile(
+          contentPadding: EdgeInsets.zero,
+          leading: const Icon(Icons.event_available),
+          title: Text(atendimento == null ? 'Agendar atendimento' : 'Atendimento: dia ${dataHoraBr(atendimento!)}'),
+          trailing: atendimento == null
+              ? null
+              : IconButton(icon: const Icon(Icons.clear), onPressed: () => setState(() => atendimento = null)),
+          onTap: escolherAtendimento,
+        ),
+        escolha<bool>('Confirmado no dia?', _simNao, confirmado, (v) => setState(() => confirmado = v)),
+        ListTile(
+          contentPadding: EdgeInsets.zero,
+          leading: const Icon(Icons.notifications_active),
+          title: Text(retorno == null ? 'Definir próximo retorno (lembrete)' : 'Retorno em ${dataBr(retorno!)}'),
+          trailing: retorno == null
+              ? null
+              : IconButton(icon: const Icon(Icons.clear), onPressed: () => setState(() => retorno = null)),
+          onTap: () async {
+            final d = await showDatePicker(
+              context: context,
+              initialDate: retorno == null ? DateTime.now() : DateTime.parse(retorno!),
+              firstDate: DateTime(2020),
+              lastDate: DateTime(2100),
+            );
+            if (d != null) setState(() => retorno = d.toIso8601String().substring(0, 10));
+          },
+        ),
+        const SizedBox(height: 8),
+        campo('Observações (opcional)', obs, linhas: 3),
+        FilledButton(
+          onPressed: salvando
+              ? null
+              : () async {
+                  final r = await salvar();
+                  if (r != null && mounted) Navigator.pop(context);
+                },
+          child: Text(salvando ? 'Salvando...' : 'Salvar lead'),
+        ),
+        const SizedBox(height: 8),
+        OutlinedButton.icon(
+          onPressed: salvando
+              ? null
+              : () async {
+                  final r = await salvar();
+                  if (r == null) return;
+                  await enviarFicha(r);
+                  if (mounted) Navigator.pop(context);
+                },
+          icon: const Icon(Icons.send),
+          label: const Text('Salvar e enviar ao gerente'),
+        ),
+      ]),
+    );
+  }
 }
 
 // ---------------------------------------------------------------- Comissões
