@@ -158,6 +158,8 @@ String fichaTexto(Map<String, dynamic> l) {
     '*Cliente:* ${vazio(l['nome'])}',
     '*Telefone:* ${vazio(l['telefone'])}',
     '*Canal de origem:* ${vazio(l['origem'])}',
+    if (l['imovel_opcoes'] != null)
+      '*Opção de casa:* ${l['imovel_opcoes']['tipo']} · ${brl(l['imovel_opcoes']['valor'] as num)} · terreno ${l['imovel_opcoes']['terreno']}',
     '',
     '*Quem vai morar:* ${vazio(l['quem_vai_morar'])}',
     '*Mora hoje:* ${opcoesMoraHoje[l['mora_hoje']] ?? '—'}$aluguel',
@@ -186,6 +188,55 @@ Future<void> enviarFicha(Map<String, dynamic> l) async {
     'encaminhado_em': DateTime.now().toUtc().toIso8601String(),
     if (l['proximo_retorno'] == null) 'proximo_retorno': retorno,
   }).eq('id', l['id']);
+}
+
+const tecladoDecimal = TextInputType.numberWithOptions(decimal: true);
+
+// Linhas de informação do empreendimento (só mostra o que estiver preenchido).
+List<Widget> linhasImovel(Map<String, dynamic> m) {
+  String? d(dynamic v) => (v == null || v.toString().trim().isEmpty) ? null : v.toString().trim();
+  String? r(dynamic v) => v == null ? null : brl(v as num);
+  final cheque = r(m['cheque_paulista']);
+  final itens = <String, String?>{
+    'Entrega': d(m['entrega']),
+    'Lançamento': d(m['lancamento']),
+    'Avaliação da Caixa': r(m['avaliacao_caixa']),
+    'Sinal': r(m['sinal']),
+    'Parcelamento': d(m['parcelamento']),
+    'Cheque Paulista': cheque == null
+        ? null
+        : '$cheque de desconto (renda familiar até 3 salários mínimos, enquanto durarem os cheques)',
+    'Casa': d(m['descricao_casa']),
+    'Infraestrutura': d(m['infraestrutura']),
+    'Sobre o bairro': d(m['sobre_bairro']),
+  };
+  return [
+    for (final e in itens.entries)
+      if (e.value != null)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 6),
+          child: Text.rich(TextSpan(children: [
+            TextSpan(text: '${e.key}: ', style: const TextStyle(fontWeight: FontWeight.w700)),
+            TextSpan(text: e.value),
+          ])),
+        ),
+  ];
+}
+
+Widget infoImovel(Map<String, dynamic> m) {
+  final linhas = linhasImovel(m);
+  if (linhas.isEmpty) return const SizedBox.shrink();
+  return Card(
+    margin: const EdgeInsets.only(top: 8),
+    child: ExpansionTile(
+      title: const Text('Informações do empreendimento'),
+      shape: const Border(),
+      collapsedShape: const Border(),
+      childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+      expandedCrossAxisAlignment: CrossAxisAlignment.start,
+      children: linhas,
+    ),
+  );
 }
 
 class App extends StatelessWidget {
@@ -284,7 +335,7 @@ class _HomeState extends State<HomePage> {
   @override
   Widget build(BuildContext context) => Scaffold(
         appBar: AppBar(
-          title: Text(const ['Leads', 'Comissões', 'Imóveis', 'Relatórios'][aba]),
+          title: Text(const ['Leads', 'Comissões', 'Imóveis', 'Relatórios', 'Reativar'][aba]),
           actions: [
             IconButton(
               tooltip: 'Sair',
@@ -293,7 +344,7 @@ class _HomeState extends State<HomePage> {
             ),
           ],
         ),
-        body: const [LeadsTab(), ComissoesTab(), ImoveisTab(), RelatoriosTab()][aba],
+        body: const [LeadsTab(), ComissoesTab(), ImoveisTab(), RelatoriosTab(), ReativarTab()][aba],
         bottomNavigationBar: NavigationBar(
           selectedIndex: aba,
           onDestinationSelected: (i) => setState(() => aba = i),
@@ -302,6 +353,7 @@ class _HomeState extends State<HomePage> {
             NavigationDestination(icon: Icon(Icons.payments), label: 'Comissões'),
             NavigationDestination(icon: Icon(Icons.home_work), label: 'Imóveis'),
             NavigationDestination(icon: Icon(Icons.bar_chart), label: 'Relatórios'),
+            NavigationDestination(icon: Icon(Icons.campaign), label: 'Reativar'),
           ],
         ),
       );
@@ -327,7 +379,7 @@ class _LeadsState extends State<LeadsTab> {
     try {
       final r = await db
           .from('leads')
-          .select('*, imoveis(nome, valor_base, percentual_comissao)')
+          .select('*, imoveis(nome, valor_base, percentual_comissao), imovel_opcoes(tipo, terreno, valor)')
           .order('criado_em', ascending: false);
       if (mounted) setState(() => leads = r);
       Lembretes.sincronizar(r);
@@ -356,7 +408,10 @@ class _LeadsState extends State<LeadsTab> {
 
   Future<void> fecharVenda(Map<String, dynamic> l) async {
     final im = l['imoveis'];
-    final valor = TextEditingController(text: im == null ? '' : paraTexto(im['valor_base']));
+    final op = l['imovel_opcoes'];
+    final valor = TextEditingController(
+      text: op != null ? paraTexto(op['valor']) : (im == null ? '' : paraTexto(im['valor_base'])),
+    );
     final perc = TextEditingController(text: im == null ? '' : paraTexto(im['percentual_comissao']));
     const teclado = TextInputType.numberWithOptions(decimal: true);
     final ok = await showDialog<bool>(
@@ -575,6 +630,8 @@ class _LeadFormState extends State<LeadForm> {
   late String? retorno = l['proximo_retorno'];
   List<Map<String, dynamic>> imoveis = [];
   Map<String, dynamic>? imovel;
+  List<Map<String, dynamic>> opcoes = [];
+  Map<String, dynamic>? opcao;
   bool salvando = false;
 
   static const _decimal = TextInputType.numberWithOptions(decimal: true);
@@ -590,7 +647,27 @@ class _LeadFormState extends State<LeadForm> {
         imoveis = r.where((i) => i['ativo'] == true || i['id'] == atual).toList();
         imovel = imoveis.where((i) => i['id'] == atual).firstOrNull;
       });
+      carregarOpcoes(selecionar: l['opcao_id']);
     });
+  }
+
+  Future<void> carregarOpcoes({dynamic selecionar}) async {
+    final id = imovel?['id'];
+    if (id == null) {
+      setState(() {
+        opcoes = [];
+        opcao = null;
+      });
+      return;
+    }
+    try {
+      final r = await db.from('imovel_opcoes').select().eq('imovel_id', id).order('valor');
+      if (!mounted) return;
+      setState(() {
+        opcoes = r.where((o) => o['ativo'] == true || o['id'] == selecionar).toList();
+        opcao = opcoes.where((o) => o['id'] == selecionar).firstOrNull;
+      });
+    } catch (_) {}
   }
 
   Map<String, dynamic> dados() => {
@@ -599,6 +676,7 @@ class _LeadFormState extends State<LeadForm> {
         'telefone': tel.text.trim(),
         'origem': canal,
         'imovel_id': imovel?['id'],
+        'opcao_id': opcao?['id'],
         'quem_vai_morar': quemMora.text.trim(),
         'mora_hoje': moraHoje,
         'valor_aluguel': moraHoje == 'aluguel' ? lerNum(aluguel.text) : null,
@@ -636,7 +714,7 @@ class _LeadFormState extends State<LeadForm> {
     }
     setState(() => salvando = true);
     try {
-      const sel = '*, imoveis(nome, valor_base, percentual_comissao)';
+      const sel = '*, imoveis(nome, valor_base, percentual_comissao), imovel_opcoes(tipo, terreno, valor)';
       final Map<String, dynamic> r = widget.lead == null
           ? await db.from('leads').insert(dados()).select(sel).single()
           : await db.from('leads').update(dados()).eq('id', widget.lead!['id']).select(sel).single();
@@ -737,17 +815,42 @@ class _LeadFormState extends State<LeadForm> {
             for (final i in imoveis)
               DropdownMenuItem(value: i, child: Text(i['nome'], overflow: TextOverflow.ellipsis)),
           ],
-          onChanged: (v) => setState(() => imovel = v),
+          onChanged: (v) {
+            setState(() {
+              imovel = v;
+              opcao = null;
+            });
+            carregarOpcoes();
+          },
         ),
-        if (imovel != null)
+        if (imovel != null) ...[
+          const SizedBox(height: 12),
+          DropdownButtonFormField<Map<String, dynamic>>(
+            value: opcao,
+            isExpanded: true,
+            decoration: const InputDecoration(labelText: 'Opção de casa', border: OutlineInputBorder()),
+            items: [
+              for (final o in opcoes)
+                DropdownMenuItem(
+                  value: o,
+                  child: Text(
+                    '${brl(o['valor'])} · ${o['tipo']} · terreno ${o['terreno'] ?? '—'}',
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+            ],
+            onChanged: (v) => setState(() => opcao = v),
+          ),
           Padding(
             padding: const EdgeInsets.only(top: 8),
             child: Text(
-              'Comissão estimada: ${brl(imovel!['valor_base'] * imovel!['percentual_comissao'] / 100)} '
+              'Comissão estimada: ${brl((opcao?['valor'] ?? imovel!['valor_base']) * imovel!['percentual_comissao'] / 100)} '
               '(${paraTexto(imovel!['percentual_comissao'])}%)',
               style: const TextStyle(fontWeight: FontWeight.w700),
             ),
           ),
+          infoImovel(imovel!),
+        ],
         secao('Perfil da família'),
         campo('Quem vai morar', quemMora),
         lista('Mora hoje', opcoesMoraHoje, moraHoje, (v) => setState(() => moraHoje = v)),
@@ -1048,10 +1151,20 @@ class _ImoveisState extends State<ImoveisTab> {
                           if ((i['localizacao'] ?? '').toString().isNotEmpty) i['localizacao'],
                           brl(i['valor_base']),
                         ].join(' · ')),
-                        trailing: i['ativo'] == true
-                            ? etiqueta('${paraTexto(i['percentual_comissao'])}%', verde)
-                            : etiqueta('Inativo', const Color(0xFF546E7A)),
-                        onTap: () => editar(i),
+                        trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                          i['ativo'] == true
+                              ? etiqueta('${paraTexto(i['percentual_comissao'])}%', verde)
+                              : etiqueta('Inativo', const Color(0xFF546E7A)),
+                          IconButton(
+                            tooltip: 'Editar imóvel',
+                            icon: const Icon(Icons.edit_outlined),
+                            onPressed: () => editar(i),
+                          ),
+                        ]),
+                        onTap: () async {
+                          await Navigator.push(context, MaterialPageRoute(builder: (_) => ImovelPage(imovel: i)));
+                          carregar();
+                        },
                       ),
                     ),
                 ]),
@@ -1270,5 +1383,534 @@ class Lembretes {
         );
       }
     } catch (_) {}
+  }
+}
+
+// ---------------------------------------------------------------- Detalhe do imóvel
+class ImovelPage extends StatefulWidget {
+  final Map<String, dynamic> imovel;
+  const ImovelPage({super.key, required this.imovel});
+  @override
+  State<ImovelPage> createState() => _ImovelPageState();
+}
+
+class _ImovelPageState extends State<ImovelPage> {
+  List<Map<String, dynamic>>? opcoes;
+
+  @override
+  void initState() {
+    super.initState();
+    carregar();
+  }
+
+  Future<void> carregar() async {
+    try {
+      final r = await db.from('imovel_opcoes').select().eq('imovel_id', widget.imovel['id']).order('valor');
+      if (mounted) setState(() => opcoes = r);
+    } catch (e) {
+      if (mounted) {
+        setState(() => opcoes = []);
+        aviso(context, 'Erro ao carregar as opções: $e');
+      }
+    }
+  }
+
+  Future<void> editar([Map<String, dynamic>? o]) async {
+    final tipo = TextEditingController(text: o?['tipo'] ?? '2 quartos');
+    final terreno = TextEditingController(text: o?['terreno']);
+    final valor = TextEditingController(text: o == null ? '' : paraTexto(o['valor']));
+    final casas = TextEditingController(text: o?['casas']?.toString() ?? '');
+    bool ativo = o?['ativo'] ?? true;
+    final acao = await showDialog<String>(
+      context: context,
+      builder: (c) => StatefulBuilder(
+        builder: (c, set) => AlertDialog(
+          title: Text(o == null ? 'Nova opção de casa' : 'Editar opção'),
+          content: SingleChildScrollView(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              TextField(controller: tipo, decoration: const InputDecoration(labelText: 'Tipo (ex.: 2 quartos com suíte)')),
+              TextField(controller: terreno, decoration: const InputDecoration(labelText: 'Terreno (ex.: 144 a 148 m²)')),
+              TextField(
+                controller: valor,
+                keyboardType: tecladoDecimal,
+                decoration: const InputDecoration(labelText: 'Valor (R\$)'),
+              ),
+              TextField(
+                controller: casas,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(labelText: 'Casas disponíveis'),
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Disponível'),
+                value: ativo,
+                onChanged: (v) => set(() => ativo = v),
+              ),
+            ]),
+          ),
+          actions: [
+            if (o != null) TextButton(onPressed: () => Navigator.pop(c, 'excluir'), child: const Text('Excluir')),
+            TextButton(onPressed: () => Navigator.pop(c), child: const Text('Cancelar')),
+            FilledButton(onPressed: () => Navigator.pop(c, 'salvar'), child: const Text('Salvar')),
+          ],
+        ),
+      ),
+    );
+    if (acao == null) return;
+    try {
+      if (acao == 'excluir') {
+        await db.from('imovel_opcoes').delete().eq('id', o!['id']);
+      } else {
+        final v = lerNum(valor.text);
+        if (tipo.text.trim().isEmpty || v == null) {
+          if (mounted) aviso(context, 'Preencha o tipo e o valor.');
+          return;
+        }
+        final dados = {
+          'imovel_id': widget.imovel['id'],
+          'tipo': tipo.text.trim(),
+          'terreno': terreno.text.trim(),
+          'valor': v,
+          'casas': int.tryParse(casas.text.trim()),
+          'ativo': ativo,
+        };
+        if (o == null) {
+          await db.from('imovel_opcoes').insert(dados);
+        } else {
+          await db.from('imovel_opcoes').update(dados).eq('id', o['id']);
+        }
+      }
+    } catch (e) {
+      if (mounted) aviso(context, 'Erro ao salvar: $e');
+    }
+    carregar();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final m = widget.imovel;
+    final titulo = Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700);
+    return Scaffold(
+      appBar: AppBar(title: Text(m['nome'])),
+      floatingActionButton: FloatingActionButton.extended(
+        icon: const Icon(Icons.add),
+        label: const Text('Nova opção'),
+        onPressed: () => editar(),
+      ),
+      body: ListView(padding: const EdgeInsets.fromLTRB(12, 8, 12, 96), children: [
+        Row(children: [
+          logoImovel(m['nome'].toString(), tamanho: 84),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(m['nome'], style: titulo),
+              if ((m['localizacao'] ?? '').toString().isNotEmpty) Text(m['localizacao']),
+              const SizedBox(height: 6),
+              etiqueta('a partir de ${brl(m['valor_base'])} · comissão ${paraTexto(m['percentual_comissao'])}%', verde),
+            ]),
+          ),
+        ]),
+        const SizedBox(height: 14),
+        ...linhasImovel(m).map((w) => Padding(padding: const EdgeInsets.symmetric(horizontal: 4), child: w)),
+        const SizedBox(height: 8),
+        Text('Opções de casa', style: titulo?.copyWith(color: petroleo)),
+        const SizedBox(height: 4),
+        if (opcoes == null)
+          const Padding(padding: EdgeInsets.all(24), child: Center(child: CircularProgressIndicator()))
+        else if (opcoes!.isEmpty)
+          const Padding(padding: EdgeInsets.all(24), child: Text('Nenhuma opção cadastrada. Toque em Nova opção.'))
+        else
+          for (final o in opcoes!)
+            Card(
+              margin: const EdgeInsets.symmetric(vertical: 5),
+              child: ListTile(
+                leading: CircleAvatar(
+                  backgroundColor: petroleo.withValues(alpha: .12),
+                  child: Icon(o['tipo'].toString().contains('suíte') ? Icons.king_bed : Icons.bed, color: petroleo),
+                ),
+                title: Text('${brl(o['valor'])} · ${o['tipo']}', style: const TextStyle(fontWeight: FontWeight.w600)),
+                subtitle: Text('Terreno ${o['terreno'] ?? '—'}${o['casas'] == null ? '' : ' · ${o['casas']} casa(s)'}'),
+                trailing: o['ativo'] == true ? null : etiqueta('Indisponível', const Color(0xFF546E7A)),
+                onTap: () => editar(o),
+              ),
+            ),
+      ]),
+    );
+  }
+}
+
+// ---------------------------------------------------------------- Reativar leads antigos
+const mensagemPadrao = 'Olá, [nome]! Tudo bem? Aqui é o Pedro, da Pacaembu 😊';
+
+const statusReativacao = {
+  'pendente': 'Pendente',
+  'enviado': 'Enviado',
+  'respondeu': 'Respondeu',
+  'descartado': 'Descartado',
+};
+
+Color corReativacao(String s) => switch (s) {
+      'pendente' => azul,
+      'enviado' => laranja,
+      'respondeu' => verde,
+      _ => const Color(0xFF546E7A),
+    };
+
+String tituloCaso(String s) {
+  const minusculas = {'de', 'da', 'do', 'dos', 'das', 'e'};
+  return s
+      .trim()
+      .toLowerCase()
+      .split(RegExp(r'\s+'))
+      .map((p) => (p.isEmpty || minusculas.contains(p)) ? p : p[0].toUpperCase() + p.substring(1))
+      .join(' ');
+}
+
+String primeiroNome(String s) => tituloCaso(s).split(' ').first;
+
+// Telefone com DDI 55: aceita 10 ou 11 dígitos (com DDD) ou 12/13 já com 55.
+String? normalizarFone(String bruto) {
+  var d = bruto.replaceAll(RegExp(r'\D'), '');
+  if (d.startsWith('0')) d = d.substring(1);
+  if (d.length == 10 || d.length == 11) return '55$d';
+  if ((d.length == 12 || d.length == 13) && d.startsWith('55')) return d;
+  return null;
+}
+
+String foneBonito(String t) {
+  final d = t.startsWith('55') ? t.substring(2) : t;
+  if (d.length == 11) return '(${d.substring(0, 2)}) ${d.substring(2, 7)}-${d.substring(7)}';
+  if (d.length == 10) return '(${d.substring(0, 2)}) ${d.substring(2, 6)}-${d.substring(6)}';
+  return t;
+}
+
+// Lê um contato por linha (nome e telefone em qualquer ordem, separados por tab, ; , ou espaço).
+({List<Map<String, String>> contatos, int ignoradas}) lerContatos(String texto) {
+  final vistos = <String>{};
+  final contatos = <Map<String, String>>[];
+  var ignoradas = 0;
+  final reFone = RegExp(r'\+?\d[\d\s().-]{8,}\d');
+  for (final linha in texto.split(RegExp(r'[\r\n]+'))) {
+    if (linha.trim().isEmpty) continue;
+    final m = reFone.firstMatch(linha);
+    final fone = m == null ? null : normalizarFone(m.group(0)!);
+    final nome = linha
+        .replaceFirst(reFone, ' ')
+        .replaceAll(RegExp(r'[;,|\t]+'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    if (fone == null || nome.isEmpty || !vistos.add(fone)) {
+      ignoradas++;
+      continue;
+    }
+    contatos.add({'nome': tituloCaso(nome), 'telefone': fone});
+  }
+  return (contatos: contatos, ignoradas: ignoradas);
+}
+
+class ReativarTab extends StatefulWidget {
+  const ReativarTab({super.key});
+  @override
+  State<ReativarTab> createState() => _ReativarState();
+}
+
+class _ReativarState extends State<ReativarTab> {
+  List<Map<String, dynamic>>? contatos;
+  String filtro = 'pendente';
+  String busca = '';
+
+  @override
+  void initState() {
+    super.initState();
+    carregar();
+  }
+
+  String get modelo {
+    final m = db.auth.currentUser?.userMetadata?['msg_reativacao'];
+    return (m == null || m.toString().trim().isEmpty) ? mensagemPadrao : m.toString();
+  }
+
+  String mensagemPara(Map<String, dynamic> c) => modelo.replaceAll('[nome]', primeiroNome(c['nome']));
+
+  Future<void> carregar() async {
+    try {
+      final r = await db.from('contatos_reativacao').select().order('nome');
+      if (mounted) setState(() => contatos = r);
+    } catch (e) {
+      if (mounted) {
+        setState(() => contatos = []);
+        aviso(context, 'Erro ao carregar a lista: $e');
+      }
+    }
+  }
+
+  Future<void> mudar(Map<String, dynamic> c, String status) async {
+    await db.from('contatos_reativacao').update({
+      'status': status,
+      'enviado_em': status == 'enviado'
+          ? DateTime.now().toUtc().toIso8601String()
+          : (status == 'pendente' ? null : c['enviado_em']),
+    }).eq('id', c['id']);
+    carregar();
+  }
+
+  // Abre o WhatsApp com a mensagem pronta e marca o contato como enviado.
+  Future<void> enviar(Map<String, dynamic> c) async {
+    await abrir('https://wa.me/${c['telefone']}?text=${Uri.encodeComponent(mensagemPara(c))}');
+    await mudar(c, 'enviado');
+  }
+
+  Future<bool> confirmar(String texto) async =>
+      await showDialog<bool>(
+        context: context,
+        builder: (d) => AlertDialog(
+          content: Text(texto),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(d, false), child: const Text('Cancelar')),
+            FilledButton(onPressed: () => Navigator.pop(d, true), child: const Text('Confirmar')),
+          ],
+        ),
+      ) ??
+      false;
+
+  Future<void> importar() async {
+    final texto = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (d) => AlertDialog(
+        title: const Text('Importar lista'),
+        content: SingleChildScrollView(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const Text('Cole uma linha por contato, com nome e telefone. Pode copiar direto da planilha.'),
+            const SizedBox(height: 12),
+            TextField(
+              controller: texto,
+              minLines: 6,
+              maxLines: 10,
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                hintText: 'MARIA SILVA   17999999999',
+              ),
+            ),
+          ]),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(d, false), child: const Text('Cancelar')),
+          FilledButton(onPressed: () => Navigator.pop(d, true), child: const Text('Importar')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final r = lerContatos(texto.text);
+    if (r.contatos.isEmpty) {
+      if (mounted) aviso(context, 'Não encontrei nenhum contato com nome e telefone no texto.');
+      return;
+    }
+    try {
+      final total = r.contatos.length;
+      for (var i = 0; i < total; i += 200) {
+        final fim = i + 200 > total ? total : i + 200;
+        await db
+            .from('contatos_reativacao')
+            .upsert(r.contatos.sublist(i, fim), onConflict: 'user_id,telefone', ignoreDuplicates: true);
+      }
+      if (mounted) {
+        aviso(context, '$total contatos lidos${r.ignoradas > 0 ? ' (${r.ignoradas} linhas ignoradas)' : ''}. Repetidos não são duplicados.');
+      }
+    } catch (e) {
+      if (mounted) aviso(context, 'Erro ao importar: $e');
+    }
+    carregar();
+  }
+
+  Future<void> editarMensagem() async {
+    final texto = TextEditingController(text: modelo);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (d) => AlertDialog(
+        title: const Text('Mensagem padrão'),
+        content: SingleChildScrollView(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const Text('Use [nome] onde o primeiro nome do contato deve aparecer.'),
+            const SizedBox(height: 12),
+            TextField(
+              controller: texto,
+              minLines: 3,
+              maxLines: 6,
+              decoration: const InputDecoration(border: OutlineInputBorder()),
+            ),
+          ]),
+        ),
+        actions: [
+          TextButton(onPressed: () => texto.text = mensagemPadrao, child: const Text('Padrão')),
+          TextButton(onPressed: () => Navigator.pop(d, false), child: const Text('Cancelar')),
+          FilledButton(onPressed: () => Navigator.pop(d, true), child: const Text('Salvar')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      await db.auth.updateUser(UserAttributes(data: {'msg_reativacao': texto.text.trim()}));
+    } catch (e) {
+      if (mounted) aviso(context, 'Erro ao salvar a mensagem: $e');
+    }
+    if (mounted) setState(() {});
+  }
+
+  Widget resumo(String titulo, int n, Color cor) => Expanded(
+        child: Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: cor.withValues(alpha: .08),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: cor.withValues(alpha: .3)),
+          ),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(titulo, style: TextStyle(color: cor, fontWeight: FontWeight.w600, fontSize: 12)),
+            const SizedBox(height: 4),
+            Text('$n', style: TextStyle(color: cor, fontWeight: FontWeight.w700, fontSize: 22)),
+          ]),
+        ),
+      );
+
+  Widget item(Map<String, dynamic> c) {
+    final cor = corReativacao(c['status']);
+    final nome = c['nome'].toString();
+    return Card(
+      child: ListTile(
+        leading: CircleAvatar(
+          backgroundColor: cor.withValues(alpha: .14),
+          child: Text(
+            nome.isEmpty ? '?' : nome[0].toUpperCase(),
+            style: TextStyle(color: cor, fontWeight: FontWeight.w700),
+          ),
+        ),
+        title: Text(nome, style: const TextStyle(fontWeight: FontWeight.w600)),
+        subtitle: Text.rich(TextSpan(children: [
+          TextSpan(text: '${foneBonito(c['telefone'])} · '),
+          TextSpan(
+            text: statusReativacao[c['status']] ?? c['status'],
+            style: TextStyle(color: cor, fontWeight: FontWeight.w600),
+          ),
+        ])),
+        trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+          IconButton(
+            tooltip: 'Enviar mensagem',
+            icon: const Icon(Icons.send, color: verde),
+            onPressed: () => enviar(c),
+          ),
+          PopupMenuButton<String>(
+            onSelected: (v) async {
+              if (v == 'excluir') {
+                if (await confirmar('Excluir ${c['nome']} da lista?')) {
+                  await db.from('contatos_reativacao').delete().eq('id', c['id']);
+                  carregar();
+                }
+              } else {
+                await mudar(c, v);
+              }
+            },
+            itemBuilder: (_) => const [
+              PopupMenuItem(value: 'respondeu', child: Text('Marcar como respondeu')),
+              PopupMenuItem(value: 'descartado', child: Text('Descartar')),
+              PopupMenuItem(value: 'pendente', child: Text('Voltar para pendente')),
+              PopupMenuItem(value: 'excluir', child: Text('Excluir da lista')),
+            ],
+          ),
+        ]),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (contatos == null) return const Center(child: CircularProgressIndicator());
+    int qtd(String s) => contatos!.where((c) => c['status'] == s).length;
+    final proximo = contatos!.where((c) => c['status'] == 'pendente').firstOrNull;
+    final termo = busca.trim().toLowerCase();
+    final visiveis = contatos!
+        .where((c) =>
+            (filtro == 'todos' || c['status'] == filtro) &&
+            (termo.isEmpty ||
+                c['nome'].toString().toLowerCase().contains(termo) ||
+                c['telefone'].toString().contains(termo)))
+        .toList();
+    const filtros = {'pendente': 'Pendentes', 'enviado': 'Enviados', 'respondeu': 'Respostas', 'todos': 'Todos'};
+
+    final cabecalho = Padding(
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          resumo('Pendentes', qtd('pendente'), azul),
+          const SizedBox(width: 8),
+          resumo('Enviados', qtd('enviado'), laranja),
+          const SizedBox(width: 8),
+          resumo('Respostas', qtd('respondeu'), verde),
+        ]),
+        const SizedBox(height: 12),
+        SizedBox(
+          width: double.infinity,
+          child: FilledButton.icon(
+            onPressed: proximo == null ? null : () => enviar(proximo),
+            icon: const Icon(Icons.send),
+            label: Text(proximo == null
+                ? 'Nenhum contato pendente'
+                : 'Enviar para ${primeiroNome(proximo['nome'])} (próximo)'),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Row(children: [
+          Expanded(
+            child: OutlinedButton.icon(
+              onPressed: importar,
+              icon: const Icon(Icons.upload_file),
+              label: const Text('Importar lista'),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: OutlinedButton.icon(
+              onPressed: editarMensagem,
+              icon: const Icon(Icons.edit_note),
+              label: const Text('Mensagem'),
+            ),
+          ),
+        ]),
+        const SizedBox(height: 6),
+        Text(
+          'Envie aos poucos, com intervalos, para reduzir o risco de o WhatsApp limitar o seu número.',
+          style: Theme.of(context).textTheme.bodySmall,
+        ),
+        const SizedBox(height: 8),
+        Wrap(spacing: 8, children: [
+          for (final e in filtros.entries)
+            ChoiceChip(
+              label: Text(e.value),
+              selected: filtro == e.key,
+              onSelected: (_) => setState(() => filtro = e.key),
+            ),
+        ]),
+        const SizedBox(height: 8),
+        TextField(
+          onChanged: (v) => setState(() => busca = v),
+          decoration: const InputDecoration(
+            prefixIcon: Icon(Icons.search),
+            hintText: 'Buscar por nome ou telefone',
+            border: OutlineInputBorder(),
+            isDense: true,
+          ),
+        ),
+        const SizedBox(height: 4),
+      ]),
+    );
+
+    return RefreshIndicator(
+      onRefresh: carregar,
+      child: ListView.builder(
+        padding: const EdgeInsets.only(bottom: 24),
+        itemCount: visiveis.length + 1,
+        itemBuilder: (_, i) => i == 0 ? cabecalho : item(visiveis[i - 1]),
+      ),
+    );
   }
 }
